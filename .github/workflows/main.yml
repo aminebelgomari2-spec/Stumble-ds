@@ -18,10 +18,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Toolchain Dependencies
+      - name: Check Toolchain
         run: |
-          dkp-pacman -Syu --noconfirm 3ds-dev
-          which arm-none-eabi-gcc smdhtool 3dsxtool || true
+          echo "DEVKITPRO=$DEVKITPRO"
+          which arm-none-eabi-gcc smdhtool 3dsxtool
+          ls "$DEVKITPRO/libctru/lib" || true
 
       - name: Build 3DSX
         run: make -j"$(nproc)"

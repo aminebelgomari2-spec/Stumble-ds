@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -17,18 +20,23 @@ jobs:
 
       - name: Install Toolchain Dependencies
         run: |
-          apt-get update && apt-get install -y qrencode p7zip-full
-          which 3dsxtool || true
+          dkp-pacman -Syu --noconfirm 3ds-dev
+          which arm-none-eabi-gcc smdhtool 3dsxtool || true
 
       - name: Build 3DSX
-        run: |
-          make
+        run: make -j"$(nproc)"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StumbleGuys3DS
+          path: StumbleGuys3DS.3dsx
+          if-no-files-found: error
 
       - name: Create GitHub Release
-        id: create_release
-        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
-          files: |
-            StumbleGuys3DS.3dsx
+          files: StumbleGuys3DS.3dsx
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

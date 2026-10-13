@@ -13,6 +13,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container: devkitpro/devkitarm:latest
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout Repository
@@ -21,7 +24,45 @@ jobs:
       - name: Install Dependencies
         run: |
           apt-get update
-          apt-get install -y git build-essential qrencode
+          apt-get install -y git build-essential qrencode imagemagick python3
+
+      # Cherche tes images n'importe où dans le dépôt (pas besoin de les renommer ni de les déplacer)
+      #  - nom contenant "icon" / "banner"  -> icône / bannière
+      #  - sinon : image carrée -> icône, image large -> bannière
+      - name: Prepare icon and banner
+        run: |
+          mkdir -p assets
+          ICON=""; BANNER=""
+          mapfile -t FILES < <(find . -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \) \
+            -not -path './.git/*' -not -path './build/*' -not -path './assets/*' | sort)
+          for f in "${FILES[@]}"; do
+            b=$(basename "$f" | tr 'A-Z' 'a-z')
+            case "$b" in
+              *icon*|*icone*|*icône*) [ -z "$ICON" ] && ICON="$f" ;;
+              *banner*|*banniere*|*bannière*) [ -z "$BANNER" ] && BANNER="$f" ;;
+            esac
+          done
+          for f in "${FILES[@]}"; do
+            dims=$(identify -format "%w %h" "$f[0]" 2>/dev/null) || continue
+            w=${dims% *}; h=${dims#* }
+            [ -z "$w" ] && continue
+            [ "$f" = "$ICON" ] && continue
+            [ "$f" = "$BANNER" ] && continue
+            if awk -v w="$w" -v h="$h" 'BEGIN{r=w/h; exit !(r>0.85 && r<1.18)}'; then
+              [ -z "$ICON" ] && ICON="$f"
+            elif awk -v w="$w" -v h="$h" 'BEGIN{r=w/h; exit !(r>1.4)}'; then
+              [ -z "$BANNER" ] && BANNER="$f"
+            fi
+          done
+          echo "Icône   : ${ICON:-aucune (icône par défaut)}"
+          echo "Bannière: ${BANNER:-aucune}"
+          if [ -n "$ICON" ]; then
+            convert "$ICON[0]" -resize 48x48 -background none -gravity center -extent 48x48 PNG32:assets/icon.png
+          fi
+          if [ -n "$BANNER" ]; then
+            convert "$BANNER[0]" -resize 256x128 -background black -gravity center -extent 256x128 PNG32:assets/banner.png
+          fi
+          ls -l assets || true
 
       - name: Build 3DSX
         run: make -j"$(nproc)"
@@ -45,15 +86,36 @@ jobs:
           cp bin/makerom /usr/local/bin/makerom
           makerom -version || true
 
+      - name: Build banner
+        id: banner
+        if: hashFiles('assets/banner.png') != ''
+        continue-on-error: true
+        run: |
+          git clone --recursive --depth 1 https://github.com/Steveice10/bannertool.git /tmp/bannertool
+          make -C /tmp/bannertool -j"$(nproc)"
+          BT=$(find /tmp/bannertool -type f -name bannertool -perm -u+x | head -1)
+          echo "bannertool: $BT"
+          python3 - <<'PY'
+          import wave
+          w = wave.open('/tmp/silence.wav', 'wb')
+          w.setnchannels(2); w.setsampwidth(2); w.setframerate(22050)
+          w.writeframes(b'\0' * 22050 * 4)
+          w.close()
+          PY
+          "$BT" makebanner -i assets/banner.png -a /tmp/silence.wav -o banner.bnr
+          ls -l banner.bnr
+
       - name: Build CIA
         id: cia
         if: steps.makerom.outcome == 'success'
         continue-on-error: true
         run: |
-          smdhtool --create "Stumble Guys 3DS" "Jeu de Parkour 3D et Ragdoll" "Community" \
-            "$(ls assets/icon.png 2>/dev/null || echo $DEVKITPRO/libctru/default_icon.png)" icon.smdh
+          ICON_FILE="$(ls assets/icon.png 2>/dev/null || echo $DEVKITPRO/libctru/default_icon.png)"
+          smdhtool --create "Stumble Guys 3DS" "Jeu de Parkour 3D et Ragdoll" "Community" "$ICON_FILE" icon.smdh
+          BANNER_ARG=""
+          [ -f banner.bnr ] && BANNER_ARG="-banner banner.bnr"
           makerom -f cia -o StumbleGuys3DS.cia \
-            -elf StumbleGuys3DS.elf -rsf app.rsf -icon icon.smdh \
+            -elf StumbleGuys3DS.elf -rsf app.rsf -icon icon.smdh $BANNER_ARG \
             -target t -exefslogo -DAPP_TITLE="Stumble Guys 3DS"
           ls -l StumbleGuys3DS.cia
 

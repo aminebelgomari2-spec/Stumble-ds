@@ -20,8 +20,8 @@ jobs:
 
       - name: Check Toolchain
         run: |
-          echo "DEVKITPRO=$DEVKITPRO"
-          which arm-none-eabi-gcc smdhtool 3dsxtool
+          echo "DEVKITPRO=$DEVKITPRO DEVKITARM=$DEVKITARM"
+          ls "$DEVKITARM/bin" | head -5 || true
           ls "$DEVKITPRO/libctru/lib" || true
 
       - name: Build 3DSX

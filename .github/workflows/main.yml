@@ -18,26 +18,73 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Check Toolchain
+      - name: Install Dependencies
         run: |
-          echo "DEVKITPRO=$DEVKITPRO DEVKITARM=$DEVKITARM"
-          ls "$DEVKITARM/bin" | head -5 || true
-          ls "$DEVKITPRO/libctru/lib" || true
+          apt-get update
+          apt-get install -y git build-essential qrencode
 
       - name: Build 3DSX
         run: make -j"$(nproc)"
 
-      - name: Upload build artifact
+      - name: Upload 3DSX artifact
         uses: actions/upload-artifact@v4
         with:
-          name: StumbleGuys3DS
+          name: StumbleGuys3DS-3dsx
           path: StumbleGuys3DS.3dsx
           if-no-files-found: error
+
+      # ---- CIA (installable avec FBI) ----
+      - name: Build makerom
+        id: makerom
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/3DSGuy/Project_CTR.git /tmp/Project_CTR
+          cd /tmp/Project_CTR/makerom
+          make deps
+          make -j"$(nproc)"
+          cp bin/makerom /usr/local/bin/makerom
+          makerom -version || true
+
+      - name: Build CIA
+        id: cia
+        if: steps.makerom.outcome == 'success'
+        continue-on-error: true
+        run: |
+          smdhtool --create "Stumble Guys 3DS" "Jeu de Parkour 3D et Ragdoll" "Community" \
+            "$(ls assets/icon.png 2>/dev/null || echo $DEVKITPRO/libctru/default_icon.png)" icon.smdh
+          makerom -f cia -o StumbleGuys3DS.cia \
+            -elf StumbleGuys3DS.elf -rsf app.rsf -icon icon.smdh \
+            -target t -exefslogo -DAPP_TITLE="Stumble Guys 3DS"
+          ls -l StumbleGuys3DS.cia
+
+      - name: Generate FBI QR Code
+        if: steps.cia.outcome == 'success'
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            CIA_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/StumbleGuys3DS.cia"
+          else
+            CIA_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/StumbleGuys3DS.cia"
+          fi
+          qrencode -o qrcode.png -s 8 "$CIA_URL"
+          echo "QR Code généré pour : $CIA_URL"
+
+      - name: Upload CIA and QR artifact
+        if: steps.cia.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: StumbleGuys3DS-cia-qr
+          path: |
+            StumbleGuys3DS.cia
+            qrcode.png
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: StumbleGuys3DS.3dsx
+          files: |
+            StumbleGuys3DS.3dsx
+            StumbleGuys3DS.cia
+            qrcode.png
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

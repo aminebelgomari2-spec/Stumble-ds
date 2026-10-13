@@ -17,15 +17,12 @@ jobs:
 
       - name: Install Toolchain Dependencies
         run: |
-          apt-get update && apt-get install -y qrencode wget
-          wget https://github.com/3DS-Development/3DS-Tools-Pipeline/releases/download/v1.0/bannertool -O /usr/local/bin/bannertool
-          wget https://github.com/3DS-Development/3DS-Tools-Pipeline/releases/download/v1.0/makerom -O /usr/local/bin/makerom
-          chmod +x /usr/local/bin/bannertool /usr/local/bin/makerom
+          apt-get update && apt-get install -y qrencode p7zip-full
+          which 3dsxtool || true
 
-      - name: Build 3DSX and CIA
+      - name: Build 3DSX
         run: |
           make
-          make cia
 
       - name: Create GitHub Release
         id: create_release
@@ -33,18 +30,5 @@ jobs:
         with:
           files: |
             StumbleGuys3DS.3dsx
-            StumbleGuys3DS.cia
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate FBI QR Code
-        run: |
-          CIA_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/StumbleGuys3DS.cia"
-          qrencode -o qrcode.png "$CIA_URL"
-          echo "QR Code généré pour : $CIA_URL"
-
-      - name: Upload QR Code Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fbi-qrcode
-          path: qrcode.png

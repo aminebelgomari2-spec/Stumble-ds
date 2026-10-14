@@ -4,7 +4,8 @@
 // Contrôles :
 //   Circle Pad : avancer       D-Pad : tourner la caméra
 //   B : sauter   |   B en l'air : DASH
-//   X : ragdoll (test)   SELECT : retour checkpoint   Y : recommencer   START : quitter
+//   X : ragdoll (test)   SELECT : retour checkpoint   Y : recommencer
+//   START : retour au menu (START dans le menu : quitter)
 
 #include <3ds.h>
 #include <citro2d.h>
@@ -61,6 +62,8 @@ typedef struct {
     u8 r, g, b;
     u8 coll, tile;
     float bias;
+    float vx, vz;     // vitesse (blocs dynamiques de Block Dash)
+    u8 dyn, active;
 } Solid;
 
 typedef struct { float px, py, pz, len, thick, height, speed, angle; } Bar;
@@ -70,6 +73,11 @@ static int nS = 0;
 static Bar Bs[MAX_BARS];
 static int nB = 0;
 static float gTime = 0;
+
+enum { MODE_MENU = 0, MODE_PARKOUR = 1, MODE_BLOCK = 2 };
+static int gMode = MODE_MENU;
+static float bestPk = 0, bestBD = 0;
+static int bestBDWave = 0;
 
 static void addBoxSolid(float cx, float cy, float cz, float hx, float hy, float hz,
                         u8 r, u8 g, u8 b, int coll, int tile, float bias) {
@@ -110,7 +118,7 @@ static const float CPZ[5] = { -999, 75, 113, 150, 200 };
 #define LEVEL_END_Z 208.0f
 #define LEVEL_LEN 218.0f
 
-static void buildWorld(void) {
+static void buildParkour(void) {
     nS = 0; nB = 0;
     // départ
     plat(-6, 6, -4, 14, 0, 1.5f, 90, 200, 120);
@@ -152,14 +160,118 @@ static void buildWorld(void) {
     addBoxSolid(0, 4.01f, 212, 5.5f, 0.01f, 0.6f, 30, 30, 30, 0, 0, 1.0f);
 }
 
-static void updateSolids(float t) {
+static void updateSolids(float t, float dt) {
     for (int i = 0; i < nS; i++) {
         Solid *s = &S[i];
+        if (s->dyn) {
+            if (!s->active) { s->dx = s->dy = s->dz = 0; continue; }
+            s->dx = s->vx * dt; s->dy = 0; s->dz = s->vz * dt;
+            s->cx += s->dx; s->cz += s->dz;
+            if (fabsf(s->cx) > 26 || fabsf(s->cz) > 26) { s->active = 0; s->coll = 0; s->cy = -100; }
+            continue;
+        }
         if (s->speed == 0) { s->dx = s->dy = s->dz = 0; continue; }
         float k = sinf(t * s->speed + s->phase);
         float nx = s->bx + s->ax * k, ny = s->by + s->ay * k, nz = s->bz + s->az * k;
         s->dx = nx - s->cx; s->dy = ny - s->cy; s->dz = nz - s->cz;
         s->cx = nx; s->cy = ny; s->cz = nz;
+    }
+}
+
+// ---------------------------------------------------------------- Block Dash
+#define BD_POOL 56
+#define MAX_SPK 24
+#define BD_LOW_H 1.0f
+#define BD_TALL_H 2.2f
+#define SPK_H 0.9f
+
+typedef struct { float cx, cz, vx, vz, hx, hz; u8 active; } Spike;
+static Spike Spk[MAX_SPK];
+static struct { int wave, over; float spawnT; } bd;
+static unsigned rngState = 12345u;
+
+static unsigned rnd(void) { rngState = rngState * 1664525u + 1013904223u; return rngState >> 8; }
+
+static void buildBlockDash(void) {
+    nS = 0; nB = 0;
+    plat(-12, 12, -12, 12, 0, 2.0f, 105, 115, 235);
+    for (int i = 0; i < BD_POOL; i++) {
+        addBoxSolid(0, -100, 0, 1, 0.5f, 0.5f, 255, 170, 60, 0, 0, 1.5f);
+        S[nS - 1].dyn = 1;
+    }
+}
+
+static void bdReset(void) {
+    for (int i = 0; i < nS; i++)
+        if (S[i].dyn) { S[i].active = 0; S[i].coll = 0; S[i].cy = -100; S[i].dx = S[i].dz = 0; }
+    memset(Spk, 0, sizeof(Spk));
+    bd.wave = 0; bd.over = 0; bd.spawnT = 1.5f;
+    rngState = (unsigned)osGetTime() | 1u;
+}
+
+static Solid *freeBlock(void) {
+    for (int i = 0; i < nS; i++) if (S[i].dyn && !S[i].active) return &S[i];
+    return NULL;
+}
+static Spike *freeSpike(void) {
+    for (int i = 0; i < MAX_SPK; i++) if (!Spk[i].active) return &Spk[i];
+    return NULL;
+}
+
+static void spawnWall(void) {
+    int wave = bd.wave++;
+    int dir = (wave < 3) ? 0 : (int)(rnd() % 4);
+    float speed = fminf(10.0f, 4.5f + 0.3f * wave);
+    enum { N = 12 };
+    int type[N]; // 0 trou, 1 bas, 2 haut, 3 piques
+    int mixed = (wave >= 4) && (rnd() % 2);
+    int tall = rnd() % 2;
+    for (int i = 0; i < N; i++) type[i] = mixed ? (int)(1 + rnd() % 2) : (tall ? 2 : 1);
+    int gaps = 1 + (wave >= 6) + (wave >= 14);
+    for (int g = 0; g < gaps; g++) {
+        int w = 2 + (int)(rnd() % 2), pos = (int)(rnd() % (N - w + 1));
+        for (int k = 0; k < w; k++) type[pos + k] = 0;
+    }
+    int spikes = wave >= 2 ? 1 + wave / 6 : 0;
+    if (spikes > 3) spikes = 3;
+    for (int k = 0; k < spikes; k++) { int idx = (int)(rnd() % N); if (type[idx] != 0) type[idx] = 3; }
+
+    float vx = 0, vz = 0, start = 21.0f;
+    int alongZ = (dir < 2);
+    if (dir == 0) vz = -speed; else if (dir == 1) { vz = speed; start = -start; }
+    else if (dir == 2) vx = -speed; else { vx = speed; start = -start; }
+
+    static const u8 pal[4][3] = { {255,170,60}, {80,200,255}, {120,230,120}, {255,120,200} };
+    const u8 *col = pal[rnd() % 4];
+    for (int i = 0; i < N; i++) {
+        float lat = -12.0f + 1.0f + 2.0f * i;
+        float px = alongZ ? lat : start, pz = alongZ ? start : lat;
+        if (type[i] == 1 || type[i] == 2) {
+            Solid *b = freeBlock();
+            if (!b) continue;
+            float h = type[i] == 2 ? BD_TALL_H : BD_LOW_H;
+            b->hx = alongZ ? 1.0f : 0.5f; b->hz = alongZ ? 0.5f : 1.0f; b->hy = h * 0.5f;
+            b->cx = px; b->cz = pz; b->cy = h * 0.5f;
+            b->vx = vx; b->vz = vz; b->coll = 1; b->active = 1;
+            if (type[i] == 2) { b->r = 150; b->g = 90; b->b = 235; }
+            else { b->r = col[0]; b->g = col[1]; b->b = col[2]; }
+        } else if (type[i] == 3) {
+            Spike *sp = freeSpike();
+            if (!sp) continue;
+            sp->cx = px; sp->cz = pz; sp->vx = vx; sp->vz = vz;
+            sp->hx = alongZ ? 1.0f : 0.5f; sp->hz = alongZ ? 0.5f : 1.0f; sp->active = 1;
+        }
+    }
+}
+
+static void bdUpdate(float dt) {
+    bd.spawnT -= dt;
+    if (bd.spawnT <= 0) { spawnWall(); bd.spawnT = fmaxf(1.7f, 3.5f - 0.07f * bd.wave); }
+    for (int i = 0; i < MAX_SPK; i++) {
+        Spike *sp = &Spk[i];
+        if (!sp->active) continue;
+        sp->cx += sp->vx * dt; sp->cz += sp->vz * dt;
+        if (fabsf(sp->cx) > 26 || fabsf(sp->cz) > 26) sp->active = 0;
     }
 }
 
@@ -242,13 +354,14 @@ static void depenetrate(void) {
 
 static void respawn(void) {
     memset(&P.v, 0, sizeof(P.v));
-    P.p = CPPOS[P.cp];
+    P.p = (gMode == MODE_PARKOUR) ? CPPOS[P.cp] : vmk(0, 0.02f, 0);
     P.ragdoll = 0; P.dashT = 0; P.dashUsed = 0; P.grounded = 0; P.groundSolid = -1;
     P.yaw = 0;
 }
 
 static void restartAll(void) {
     P.cp = 0; P.deaths = 0; P.finished = 0; P.time = 0; P.finishTime = 0;
+    if (gMode != MODE_PARKOUR) bdReset();
     respawn();
 }
 
@@ -380,16 +493,31 @@ static void checkBars(void) {
     }
 }
 
+// Seuls les piques provoquent un ragdoll (les murs, eux, poussent simplement).
+static void checkSpikes(void) {
+    if (P.ragdoll) return;
+    for (int i = 0; i < MAX_SPK; i++) {
+        const Spike *sp = &Spk[i];
+        if (!sp->active) continue;
+        if (fabsf(P.p.x - sp->cx) < sp->hx + PL_HW && fabsf(P.p.z - sp->cz) < sp->hz + PL_HW &&
+            P.p.y < SPK_H && P.p.y + PL_H > 0) {
+            startRagdoll(vmk(sp->vx * 0.9f, 6.5f, sp->vz * 0.9f));
+            return;
+        }
+    }
+}
+
 // ---------------------------------------------------------------- mise à jour joueur
 static float camYaw = 0, camPitch = 0.5f, camDist = 6.5f;
 static V3 camTarget;
 
 static void stepPlayer(float dt, circlePosition cp, u32 kDown) {
-    if (!P.finished) P.time += dt;
+    P.time += dt;
 
     if (kDown & KEY_X) { if (!P.ragdoll) startRagdoll(vmk(P.v.x * 0.5f, 6, P.v.z * 0.5f)); }
 
-    updateSolids(gTime);
+    updateSolids(gTime, dt);
+    if (gMode == MODE_BLOCK) bdUpdate(dt);
 
     if (P.ragdoll) {
         updateRagdoll(dt);
@@ -408,7 +536,7 @@ static void stepPlayer(float dt, circlePosition cp, u32 kDown) {
         float wx = syw * sy + cyw * sx;
         float wz = cyw * sy - syw * sx;
 
-        if (P.grounded) P.coyote = 0.1f; else P.coyote -= dt;
+        if (P.grounded) P.coyote = 0.12f; else P.coyote -= dt;
 
         if (P.dashT > 0) {
             P.dashT -= dt;
@@ -452,17 +580,25 @@ static void stepPlayer(float dt, circlePosition cp, u32 kDown) {
         P.grounded = 0; P.groundSolid = -1;
         moveAxis(1, P.v.y * dt);
 
-        for (int i = 0; i < nB; i++) Bs[i].angle += Bs[i].speed * dt;
-        checkBars();
+        if (gMode == MODE_PARKOUR) checkBars();
+        if (gMode == MODE_BLOCK) checkSpikes();
     }
-    if (P.ragdoll) for (int i = 0; i < nB; i++) Bs[i].angle += Bs[i].speed * dt;
+    for (int i = 0; i < nB; i++) Bs[i].angle += Bs[i].speed * dt;
 
-    if (P.p.y < KILL_Y) { P.deaths++; respawn(); }
+    if (P.p.y < KILL_Y) {
+        if (gMode == MODE_BLOCK) {
+            bd.over = 1;
+            if (P.time > bestBD) { bestBD = P.time; bestBDWave = bd.wave; }
+        } else { P.deaths++; respawn(); }
+    }
 
-    if (!P.ragdoll && P.grounded) {
+    if (gMode == MODE_PARKOUR && !P.ragdoll && P.grounded) {
         for (int k = P.cp + 1; k < 5; k++)
             if (P.p.z > CPZ[k] && P.p.y > CPPOS[k].y - 1.0f) P.cp = k;
-        if (!P.finished && P.p.z > LEVEL_END_Z && P.p.y > 3.0f) { P.finished = 1; P.finishTime = P.time; }
+        if (!P.finished && P.p.z > LEVEL_END_Z && P.p.y > 3.0f) {
+            P.finished = 1; P.finishTime = P.time;
+            if (bestPk <= 0 || P.finishTime < bestPk) bestPk = P.finishTime;
+        }
     }
 }
 
@@ -537,6 +673,12 @@ static void pushBox(float dist, float bias, float cx, float cy, float cz, float 
     it->yaw = yaw; it->r = r; it->g = g; it->b = b; it->kind = 0; it->mask = mask;
 }
 
+static void pushPyramid(float dist, float cx, float cy, float cz, float half, float height) {
+    int before = nI;
+    pushBox(dist, 1.0f, cx, cy, cz, half, height, half, 0, 235, 45, 45, 0);
+    if (nI > before) items[nI - 1].kind = 3;
+}
+
 static void pushSpecial(int kind, float dist, float bias) {
     if (nI >= MAX_ITEMS) return;
     Item *it = &items[nI++];
@@ -597,6 +739,15 @@ static void buildItems(void) {
         pushBox(dist, 4.0f, b->px, b->py + b->height * 0.5f, b->pz, b->len, b->height * 0.5f, b->thick * 0.5f,
                 b->angle, 225, 55, 55, 63);
     }
+    for (int i = 0; i < MAX_SPK; i++) {
+        const Spike *sp = &Spk[i];
+        float dist;
+        if (!sp->active) continue;
+        if (!visibleCenter(sp->cx, 0.4f, sp->cz, 3.0f, &dist)) continue;
+        float ox = sp->hx > sp->hz ? 0.5f : 0.0f, oz = sp->hx > sp->hz ? 0.0f : 0.5f;
+        pushPyramid(dist, sp->cx - ox, 0, sp->cz - oz, 0.45f, SPK_H);
+        pushPyramid(dist, sp->cx + ox, 0, sp->cz + oz, 0.45f, SPK_H);
+    }
     V3 c = vadd(P.p, vmk(0, 0.8f, 0));
     float cd = vlen(vsub(c, camPos));
     pushSpecial(1, cd, 2.4f);
@@ -626,6 +777,31 @@ static void drawItemBox(const Item *it) {
             float bright = 0.58f + 0.42f * fmaxf(0, vdot(n, L));
             drawPoly(w, 4, shade(it->r, it->g, it->b, bright, it->dist));
         }
+    }
+}
+
+static V3 vcross(V3 a, V3 b) {
+    return vmk(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+}
+
+static void drawPyramid(const Item *it) {
+    float h = it->hx;
+    V3 ctr = vmk(it->cx, it->cy, it->cz);
+    V3 ap = vmk(it->cx, it->cy + it->hy, it->cz);
+    V3 bc[4] = { vmk(ctr.x - h, ctr.y, ctr.z - h), vmk(ctr.x + h, ctr.y, ctr.z - h),
+                 vmk(ctr.x + h, ctr.y, ctr.z + h), vmk(ctr.x - h, ctr.y, ctr.z + h) };
+    const V3 L = { -0.32f, 0.84f, -0.43f };
+    for (int i = 0; i < 4; i++) {
+        V3 a = bc[i], b = bc[(i + 1) % 4];
+        V3 n = vcross(vsub(b, a), vsub(ap, a));
+        float l = vlen(n);
+        if (l < 1e-6f) continue;
+        n = vmul(n, 1.0f / l);
+        if (vdot(n, vsub(a, ctr)) < 0) n = vmul(n, -1.0f);
+        if (vdot(n, vsub(camPos, a)) <= 0) continue;
+        V3 t[3] = { toCam(a), toCam(b), toCam(ap) };
+        float bright = 0.6f + 0.4f * fmaxf(0, vdot(n, L));
+        drawPoly(t, 3, shade(it->r, it->g, it->b, bright, it->dist));
     }
 }
 
@@ -711,7 +887,7 @@ static void text(float x, float y, float sc, u32 clr, const char *s) {
     C2D_DrawText(&t, C2D_WithColor, x, y, 0.5f, sc, sc, clr);
 }
 
-static void renderTop(void) {
+static void drawWorld(void) {
     C2D_DrawRectangle(0, 0, 0, SCR_W, SCR_H,
                       C2D_Color32(70, 140, 235, 255), C2D_Color32(70, 140, 235, 255),
                       C2D_Color32(SKY_R, SKY_G, SKY_B, 255), C2D_Color32(SKY_R, SKY_G, SKY_B, 255));
@@ -721,46 +897,109 @@ static void renderTop(void) {
         switch (items[i].kind) {
             case 0: drawItemBox(&items[i]); break;
             case 1: drawCharacter(); break;
+            case 3: drawPyramid(&items[i]); break;
             default: drawShadow(); break;
         }
     }
-    char buf[64];
+}
+
+static void panel(float x, float y, float w, float h, u32 clr) {
+    C2D_DrawRectangle(x, y, 0, w, h, clr, clr, clr, clr);
+}
+
+static void renderTop(void) {
+    drawWorld();
+    char buf[96];
     u32 white = C2D_Color32(255, 255, 255, 255);
-    snprintf(buf, sizeof(buf), "%.1f s", P.finished ? P.finishTime : P.time);
+    u32 shadow = C2D_Color32(20, 20, 40, 255);
+    u32 gold = C2D_Color32(255, 215, 70, 255);
+
+    if (gMode == MODE_MENU) {
+        text(42, 26, 1.15f, shadow, "STUMBLE GUYS");
+        text(40, 24, 1.15f, gold, "STUMBLE GUYS");
+        text(152, 74, 0.8f, shadow, "3DS");
+        text(150, 72, 0.8f, white, "3DS");
+        return;
+    }
+
+    float tshow = (gMode == MODE_PARKOUR && P.finished) ? P.finishTime : P.time;
+    if (gMode == MODE_BLOCK) snprintf(buf, sizeof(buf), "Vague %d   %.1f s", bd.wave, tshow);
+    else snprintf(buf, sizeof(buf), "%.1f s", tshow);
     text(8, 4, 0.7f, white, buf);
     if (P.dashUsed || P.dashT > 0) text(8, 24, 0.5f, C2D_Color32(255, 120, 120, 255), "DASH utilisé");
     else text(8, 24, 0.5f, C2D_Color32(120, 255, 140, 255), "DASH prêt");
-    if (P.finished) {
-        C2D_DrawRectangle(60, 80, 0, 280, 70, C2D_Color32(0, 0, 0, 150), C2D_Color32(0, 0, 0, 150),
-                          C2D_Color32(0, 0, 0, 150), C2D_Color32(0, 0, 0, 150));
+
+    if (gMode == MODE_PARKOUR && P.finished) {
+        panel(60, 80, 280, 70, C2D_Color32(0, 0, 0, 150));
         snprintf(buf, sizeof(buf), "ARRIVÉE !  %.2f s", P.finishTime);
-        text(90, 92, 0.9f, C2D_Color32(255, 230, 80, 255), buf);
-        text(110, 124, 0.5f, white, "Y : rejouer   START : quitter");
+        text(90, 92, 0.9f, gold, buf);
+        text(110, 124, 0.5f, white, "Y : rejouer   START : menu");
+    }
+    if (gMode == MODE_BLOCK && bd.over) {
+        panel(50, 70, 300, 100, C2D_Color32(0, 0, 0, 160));
+        text(110, 80, 0.9f, C2D_Color32(255, 110, 110, 255), "ÉLIMINÉ !");
+        snprintf(buf, sizeof(buf), "Vague %d  -  %.1f s", bd.wave, P.time);
+        text(105, 112, 0.6f, white, buf);
+        text(85, 140, 0.5f, white, "Y : rejouer      START : menu");
     }
 }
 
-static void renderBottom(void) {
+static void renderBottom(int menuSel) {
     char buf[96];
     u32 white = C2D_Color32(255, 255, 255, 255);
     u32 grey = C2D_Color32(190, 200, 220, 255);
-    text(10, 8, 0.7f, C2D_Color32(255, 200, 60, 255), "STUMBLE GUYS 3DS");
-    snprintf(buf, sizeof(buf), "Temps : %.1f s     Chutes : %d", P.finished ? P.finishTime : P.time, P.deaths);
-    text(10, 38, 0.5f, white, buf);
-    snprintf(buf, sizeof(buf), "Checkpoint : %d / 4", P.cp);
-    text(10, 56, 0.5f, white, buf);
-    float prog = clampf(P.p.z / LEVEL_LEN, 0, 1);
-    C2D_DrawRectangle(10, 80, 0, 300, 10, C2D_Color32(60, 70, 90, 255), C2D_Color32(60, 70, 90, 255),
-                      C2D_Color32(60, 70, 90, 255), C2D_Color32(60, 70, 90, 255));
-    C2D_DrawRectangle(10, 80, 0, 300 * prog, 10, C2D_Color32(90, 220, 120, 255), C2D_Color32(90, 220, 120, 255),
-                      C2D_Color32(90, 220, 120, 255), C2D_Color32(90, 220, 120, 255));
-    text(10, 108, 0.45f, grey, "Circle Pad : avancer       D-Pad : caméra");
-    text(10, 126, 0.45f, grey, "B : sauter      B en l'air : DASH");
-    text(10, 144, 0.45f, grey, "X : ragdoll     SELECT : checkpoint");
-    text(10, 162, 0.45f, grey, "Y : recommencer      START : quitter");
-    text(10, 196, 0.45f, C2D_Color32(255, 150, 150, 255), "Évite les barres rouges et le vide !");
+
+    if (gMode == MODE_MENU) {
+        u32 on = C2D_Color32(255, 170, 40, 255), off = C2D_Color32(60, 75, 120, 255);
+        panel(30, 58, 260, 60, menuSel == 0 ? on : off);
+        panel(30, 128, 260, 60, menuSel == 1 ? on : off);
+        text(88, 66, 0.9f, white, "PARKOUR");
+        if (bestPk > 0) snprintf(buf, sizeof(buf), "Meilleur : %.1f s", bestPk); else snprintf(buf, sizeof(buf), "Cours jusqu'à l'arrivée");
+        text(78, 96, 0.45f, white, buf);
+        text(68, 136, 0.9f, white, "BLOCK DASH");
+        if (bestBD > 0) snprintf(buf, sizeof(buf), "Record : %.1f s (vague %d)", bestBD, bestBDWave); else snprintf(buf, sizeof(buf), "Survis aux murs de blocs");
+        text(72, 166, 0.45f, white, buf);
+        text(20, 206, 0.45f, grey, "D-Pad : choisir    B ou toucher : lancer");
+        text(20, 222, 0.42f, grey, "START : quitter");
+        return;
+    }
+
+    text(10, 8, 0.7f, C2D_Color32(255, 200, 60, 255), gMode == MODE_PARKOUR ? "PARKOUR" : "BLOCK DASH");
+    if (gMode == MODE_PARKOUR) {
+        snprintf(buf, sizeof(buf), "Temps : %.1f s     Chutes : %d", P.finished ? P.finishTime : P.time, P.deaths);
+        text(10, 38, 0.5f, white, buf);
+        snprintf(buf, sizeof(buf), "Checkpoint : %d / 4", P.cp);
+        text(10, 56, 0.5f, white, buf);
+        float prog = clampf(P.p.z / LEVEL_LEN, 0, 1);
+        panel(10, 80, 300, 10, C2D_Color32(60, 70, 90, 255));
+        panel(10, 80, 300 * prog, 10, C2D_Color32(90, 220, 120, 255));
+    } else {
+        snprintf(buf, sizeof(buf), "Vague : %d      Temps : %.1f s", bd.wave, P.time);
+        text(10, 38, 0.5f, white, buf);
+        if (bestBD > 0) { snprintf(buf, sizeof(buf), "Record : %.1f s (vague %d)", bestBD, bestBDWave); text(10, 56, 0.5f, white, buf); }
+        text(10, 80, 0.45f, C2D_Color32(255, 150, 150, 255), "Les piques rouges te font tomber.");
+        text(10, 94, 0.45f, C2D_Color32(255, 150, 150, 255), "Les murs te poussent : reste sur la plateforme !");
+    }
+    text(10, 118, 0.45f, grey, "Circle Pad : avancer       D-Pad : caméra");
+    text(10, 136, 0.45f, grey, "B : sauter      B en l'air : DASH");
+    text(10, 154, 0.45f, grey, "X : ragdoll" );
+    if (gMode == MODE_PARKOUR) text(120, 154, 0.45f, grey, "SELECT : checkpoint");
+    text(10, 172, 0.45f, grey, "Y : recommencer      START : menu");
 }
 
-// ---------------------------------------------------------------- main
+// ---------------------------------------------------------------- mode / main
+static void enterMode(int m) {
+    gMode = m;
+    memset(&P, 0, sizeof(P));
+    if (m == MODE_PARKOUR) { buildParkour(); camDist = 6.5f; camPitch = 0.5f; }
+    else { buildBlockDash(); camDist = (m == MODE_BLOCK) ? 9.5f : 8.5f; camPitch = (m == MODE_BLOCK) ? 0.75f : 0.4f; }
+    camYaw = 0;
+    restartAll();
+    camTarget = vadd(P.p, vmk(0, 1.0f, 0));
+    updateCamera(0.0f, 0);
+    if (m == MODE_MENU) { P.v = vmk(0, 0, 0); P.grounded = 1; }
+}
+
 int main(void) {
     gfxInitDefault();
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
@@ -772,34 +1011,58 @@ int main(void) {
     C3D_RenderTarget *bot = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
     gTB = C2D_TextBufNew(4096);
 
-    buildWorld();
-    memset(&P, 0, sizeof(P));
-    restartAll();
-    camTarget = vadd(P.p, vmk(0, 1.0f, 0));
+    int menuSel = 0;
+    enterMode(MODE_MENU);
 
     u64 last = osGetTime();
     while (aptMainLoop()) {
         hidScanInput();
         u32 kDown = hidKeysDown(), kHeld = hidKeysHeld();
-        if (kDown & KEY_START) break;
         circlePosition cp;
         hidCircleRead(&cp);
+        touchPosition tp;
+        hidTouchRead(&tp);
+
+        if (kDown & KEY_START) {
+            if (gMode == MODE_MENU) break;
+            enterMode(MODE_MENU);
+            last = osGetTime();
+            continue;
+        }
 
         u64 now = osGetTime();
         float dt = (now - last) / 1000.0f;
         last = now;
         dt = clampf(dt, 0.001f, 0.05f);
 
-        if (kDown & KEY_Y) restartAll();
-        if ((kDown & KEY_SELECT) && !P.finished) respawn();
+        if (gMode == MODE_MENU) {
+            int go = 0;
+            if (kDown & KEY_DUP) menuSel = 0;
+            if (kDown & KEY_DDOWN) menuSel = 1;
+            if (kDown & (KEY_B | KEY_A)) go = 1;
+            if ((kDown & KEY_TOUCH) && tp.px >= 30 && tp.px <= 290) {
+                if (tp.py >= 58 && tp.py <= 118) { menuSel = 0; go = 1; }
+                else if (tp.py >= 128 && tp.py <= 188) { menuSel = 1; go = 1; }
+            }
+            if (go) { enterMode(menuSel == 0 ? MODE_PARKOUR : MODE_BLOCK); last = osGetTime(); continue; }
+            camYaw += 0.4f * dt;
+            updateCamera(dt, 0);
+        } else {
+            if (kDown & KEY_Y) restartAll();
+            if ((kDown & KEY_SELECT) && gMode == MODE_PARKOUR && !P.finished) respawn();
 
-        int steps = dt > 0.025f ? 2 : 1;
-        float h = dt / steps;
-        for (int i = 0; i < steps; i++) {
-            gTime += h;
-            stepPlayer(h, cp, i == 0 ? kDown : 0);
+            int frozen = (gMode == MODE_PARKOUR && P.finished) ? 0 : (gMode == MODE_BLOCK && bd.over);
+            if (!frozen) {
+                int steps = dt > 0.025f ? 2 : 1;
+                float h = dt / steps;
+                for (int i = 0; i < steps; i++) {
+                    gTime += h;
+                    stepPlayer(h, cp, i == 0 ? kDown : 0);
+                    if (gMode == MODE_BLOCK && bd.over) break;
+                }
+            }
+            updateCamera(dt, kHeld);
         }
-        updateCamera(dt, kHeld);
 
         C2D_TextBufClear(gTB);
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
@@ -808,7 +1071,7 @@ int main(void) {
         renderTop();
         C2D_TargetClear(bot, C2D_Color32(25, 30, 48, 255));
         C2D_SceneBegin(bot);
-        renderBottom();
+        renderBottom(menuSel);
         C3D_FrameEnd(0);
     }
 

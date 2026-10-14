@@ -37,6 +37,11 @@
 #define SKY_B 255
 #define RAG_N 7
 #define RAG_DT (1.0f / 60.0f)
+#define BD_HX 8.0f        // demi-largeur de l'arène (16 de large)
+#define BD_HZ 9.0f        // demi-longueur de l'arène (18 de long)
+#define BD_CELLS 8
+#define BD_LIMIT 22.0f
+#define LASER_X 7.0f      // lasers sur les côtés
 
 typedef struct { float x, y, z; } V3;
 
@@ -167,7 +172,7 @@ static void updateSolids(float t, float dt) {
             if (!s->active) { s->dx = s->dy = s->dz = 0; continue; }
             s->dx = s->vx * dt; s->dy = 0; s->dz = s->vz * dt;
             s->cx += s->dx; s->cz += s->dz;
-            if (fabsf(s->cx) > 26 || fabsf(s->cz) > 26) { s->active = 0; s->coll = 0; s->cy = -100; }
+            if (fabsf(s->cx) > BD_LIMIT || fabsf(s->cz) > BD_LIMIT) { s->active = 0; s->coll = 0; s->cy = -100; }
             continue;
         }
         if (s->speed == 0) { s->dx = s->dy = s->dz = 0; continue; }
@@ -194,7 +199,10 @@ static unsigned rnd(void) { rngState = rngState * 1664525u + 1013904223u; return
 
 static void buildBlockDash(void) {
     nS = 0; nB = 0;
-    plat(-12, 12, -12, 12, 0, 2.0f, 105, 115, 235);
+    plat(-BD_HX, BD_HX, -BD_HZ, BD_HZ, 0, 2.0f, 105, 115, 235);
+    for (int k = 0; k < 4; k++)   // poteaux des lasers
+        addBoxSolid((k & 1) ? LASER_X : -LASER_X, 1.1f, (k & 2) ? BD_HZ - 0.3f : -BD_HZ + 0.3f,
+                    0.2f, 1.1f, 0.2f, 60, 60, 85, 0, 0, 1.5f);
     for (int i = 0; i < BD_POOL; i++) {
         addBoxSolid(0, -100, 0, 1, 0.5f, 0.5f, 255, 170, 60, 0, 0, 1.5f);
         S[nS - 1].dyn = 1;
@@ -220,46 +228,43 @@ static Spike *freeSpike(void) {
 
 static void spawnWall(void) {
     int wave = bd.wave++;
-    int dir = (wave < 3) ? 0 : (int)(rnd() % 4);
     float speed = fminf(10.0f, 4.5f + 0.3f * wave);
-    enum { N = 12 };
+    enum { N = BD_CELLS };
     int type[N]; // 0 trou, 1 bas, 2 haut, 3 piques
     int mixed = (wave >= 4) && (rnd() % 2);
     int tall = rnd() % 2;
     for (int i = 0; i < N; i++) type[i] = mixed ? (int)(1 + rnd() % 2) : (tall ? 2 : 1);
-    int gaps = 1 + (wave >= 6) + (wave >= 14);
+    int gaps = 1 + (wave >= 7) + (wave >= 15);
     for (int g = 0; g < gaps; g++) {
-        int w = 2 + (int)(rnd() % 2), pos = (int)(rnd() % (N - w + 1));
+        int w = 2 + (int)(rnd() % 2);                 // trou de 2 ou 3 cases
+        int pos = 1 + (int)(rnd() % (N - 1 - w));     // jamais contre les lasers
         for (int k = 0; k < w; k++) type[pos + k] = 0;
     }
     int spikes = wave >= 2 ? 1 + wave / 6 : 0;
     if (spikes > 3) spikes = 3;
     for (int k = 0; k < spikes; k++) { int idx = (int)(rnd() % N); if (type[idx] != 0) type[idx] = 3; }
 
-    float vx = 0, vz = 0, start = 21.0f;
-    int alongZ = (dir < 2);
-    if (dir == 0) vz = -speed; else if (dir == 1) { vz = speed; start = -start; }
-    else if (dir == 2) vx = -speed; else { vx = speed; start = -start; }
+    // toujours dans le même sens : du fond (+z) vers toi (-z)
+    float vz = -speed, start = BD_HZ + 8.0f;
 
     static const u8 pal[4][3] = { {255,170,60}, {80,200,255}, {120,230,120}, {255,120,200} };
     const u8 *col = pal[rnd() % 4];
     for (int i = 0; i < N; i++) {
-        float lat = -12.0f + 1.0f + 2.0f * i;
-        float px = alongZ ? lat : start, pz = alongZ ? start : lat;
+        float px = -BD_HX + 1.0f + 2.0f * i, pz = start;
         if (type[i] == 1 || type[i] == 2) {
             Solid *b = freeBlock();
             if (!b) continue;
             float h = type[i] == 2 ? BD_TALL_H : BD_LOW_H;
-            b->hx = alongZ ? 1.0f : 0.5f; b->hz = alongZ ? 0.5f : 1.0f; b->hy = h * 0.5f;
+            b->hx = 1.0f; b->hz = 0.5f; b->hy = h * 0.5f;
             b->cx = px; b->cz = pz; b->cy = h * 0.5f;
-            b->vx = vx; b->vz = vz; b->coll = 1; b->active = 1;
+            b->vx = 0; b->vz = vz; b->coll = 1; b->active = 1;
             if (type[i] == 2) { b->r = 150; b->g = 90; b->b = 235; }
             else { b->r = col[0]; b->g = col[1]; b->b = col[2]; }
         } else if (type[i] == 3) {
             Spike *sp = freeSpike();
             if (!sp) continue;
-            sp->cx = px; sp->cz = pz; sp->vx = vx; sp->vz = vz;
-            sp->hx = alongZ ? 1.0f : 0.5f; sp->hz = alongZ ? 0.5f : 1.0f; sp->active = 1;
+            sp->cx = px; sp->cz = pz; sp->vx = 0; sp->vz = vz;
+            sp->hx = 1.0f; sp->hz = 0.5f; sp->active = 1;
         }
     }
 }
@@ -271,7 +276,7 @@ static void bdUpdate(float dt) {
         Spike *sp = &Spk[i];
         if (!sp->active) continue;
         sp->cx += sp->vx * dt; sp->cz += sp->vz * dt;
-        if (fabsf(sp->cx) > 26 || fabsf(sp->cz) > 26) sp->active = 0;
+        if (fabsf(sp->cx) > BD_LIMIT || fabsf(sp->cz) > BD_LIMIT) sp->active = 0;
     }
 }
 
@@ -469,6 +474,7 @@ static void updateRagdoll(float dt) {
         float fy = fminf(P.rp[5].y, P.rp[6].y);
         P.p = vmk(hip.x, fy - 0.05f, hip.z);
         P.ragdoll = 0; P.dashUsed = 0; P.grounded = 0; P.groundSolid = -1;
+        if (gMode == MODE_BLOCK) P.p.x = clampf(P.p.x, -(LASER_X - 0.6f), LASER_X - 0.6f);
         depenetrate();
     }
 }
@@ -490,6 +496,17 @@ static void checkBars(void) {
             startRagdoll(imp);
             return;
         }
+    }
+}
+
+// Lasers sur les côtés : ils te renvoient vers le centre en ragdoll.
+static void checkLasers(void) {
+    if (P.ragdoll) return;
+    if (fabsf(P.p.x) + PL_HW > LASER_X && P.p.y < 2.2f && P.p.y + PL_H > 0 &&
+        fabsf(P.p.z) < BD_HZ + 0.5f) {
+        float side = P.p.x > 0 ? -1.0f : 1.0f;
+        P.v.x = 0; P.v.z *= 0.3f;           // on annule l'élan qui pousse vers l'extérieur
+        startRagdoll(vmk(side * 6.0f, 6.5f, 0));
     }
 }
 
@@ -581,7 +598,7 @@ static void stepPlayer(float dt, circlePosition cp, u32 kDown) {
         moveAxis(1, P.v.y * dt);
 
         if (gMode == MODE_PARKOUR) checkBars();
-        if (gMode == MODE_BLOCK) checkSpikes();
+        if (gMode == MODE_BLOCK) { checkSpikes(); checkLasers(); }
     }
     for (int i = 0; i < nB; i++) Bs[i].angle += Bs[i].speed * dt;
 
@@ -679,6 +696,12 @@ static void pushPyramid(float dist, float cx, float cy, float cz, float half, fl
     if (nI > before) items[nI - 1].kind = 3;
 }
 
+static void pushLaser(float side, float dist) {
+    int before = nI;
+    pushBox(dist, 9.0f, side * LASER_X, 1.1f, 0, 0.05f, 1.1f, BD_HZ, 0, 255, 40, 80, 0);
+    if (nI > before) items[nI - 1].kind = 4;
+}
+
 static void pushSpecial(int kind, float dist, float bias) {
     if (nI >= MAX_ITEMS) return;
     Item *it = &items[nI++];
@@ -748,6 +771,12 @@ static void buildItems(void) {
         pushPyramid(dist, sp->cx - ox, 0, sp->cz - oz, 0.45f, SPK_H);
         pushPyramid(dist, sp->cx + ox, 0, sp->cz + oz, 0.45f, SPK_H);
     }
+    if (gMode != MODE_PARKOUR) {
+        for (int k = -1; k <= 1; k += 2) {
+            float dist;
+            if (visibleCenter(k * LASER_X, 1.1f, 0, BD_HZ + 3.0f, &dist)) pushLaser((float)k, dist);
+        }
+    }
     V3 c = vadd(P.p, vmk(0, 0.8f, 0));
     float cd = vlen(vsub(c, camPos));
     pushSpecial(1, cd, 2.4f);
@@ -802,6 +831,19 @@ static void drawPyramid(const Item *it) {
         V3 t[3] = { toCam(a), toCam(b), toCam(ap) };
         float bright = 0.6f + 0.4f * fmaxf(0, vdot(n, L));
         drawPoly(t, 3, shade(it->r, it->g, it->b, bright, it->dist));
+    }
+}
+
+static void drawLaser(const Item *it) {
+    float x = it->cx, z0 = -it->hz, z1 = it->hz, top = it->hy * 2;
+    float pulse = 0.5f + 0.5f * sinf(gTime * 6.0f);
+    V3 q[4] = { toCam(vmk(x, 0, z0)), toCam(vmk(x, 0, z1)), toCam(vmk(x, top, z1)), toCam(vmk(x, top, z0)) };
+    drawPoly(q, 4, C2D_Color32(255, 30, 70, (u8)(55 + 45 * pulse)));
+    static const float bars[3] = { 0.25f, 1.05f, 1.85f };
+    for (int i = 0; i < 3; i++) {
+        V3 b[4] = { toCam(vmk(x, bars[i], z0)), toCam(vmk(x, bars[i], z1)),
+                    toCam(vmk(x, bars[i] + 0.09f, z1)), toCam(vmk(x, bars[i] + 0.09f, z0)) };
+        drawPoly(b, 4, C2D_Color32(255, 90, 120, 235));
     }
 }
 
@@ -898,6 +940,7 @@ static void drawWorld(void) {
             case 0: drawItemBox(&items[i]); break;
             case 1: drawCharacter(); break;
             case 3: drawPyramid(&items[i]); break;
+            case 4: drawLaser(&items[i]); break;
             default: drawShadow(); break;
         }
     }
@@ -977,7 +1020,7 @@ static void renderBottom(int menuSel) {
         snprintf(buf, sizeof(buf), "Vague : %d      Temps : %.1f s", bd.wave, P.time);
         text(10, 38, 0.5f, white, buf);
         if (bestBD > 0) { snprintf(buf, sizeof(buf), "Record : %.1f s (vague %d)", bestBD, bestBDWave); text(10, 56, 0.5f, white, buf); }
-        text(10, 80, 0.45f, C2D_Color32(255, 150, 150, 255), "Les piques rouges te font tomber.");
+        text(10, 80, 0.45f, C2D_Color32(255, 150, 150, 255), "Piques rouges et lasers : ragdoll.");
         text(10, 94, 0.45f, C2D_Color32(255, 150, 150, 255), "Les murs te poussent : reste sur la plateforme !");
     }
     text(10, 118, 0.45f, grey, "Circle Pad : avancer       D-Pad : caméra");
@@ -992,7 +1035,7 @@ static void enterMode(int m) {
     gMode = m;
     memset(&P, 0, sizeof(P));
     if (m == MODE_PARKOUR) { buildParkour(); camDist = 6.5f; camPitch = 0.5f; }
-    else { buildBlockDash(); camDist = (m == MODE_BLOCK) ? 9.5f : 8.5f; camPitch = (m == MODE_BLOCK) ? 0.75f : 0.4f; }
+    else { buildBlockDash(); camDist = (m == MODE_BLOCK) ? 8.5f : 8.0f; camPitch = (m == MODE_BLOCK) ? 0.75f : 0.4f; }
     camYaw = 0;
     restartAll();
     camTarget = vadd(P.p, vmk(0, 1.0f, 0));
